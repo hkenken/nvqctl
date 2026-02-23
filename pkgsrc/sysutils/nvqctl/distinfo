@@ -1,5 +1,5 @@
 $NetBSD$
 
-BLAKE2s (nvqctl-0.1.2.tar.gz) = be45d2304b5c867859f6559fe65befde0f6cdc6c4498efb8ee0462a762a50f3f
-SHA512 (nvqctl-0.1.2.tar.gz) = 96d9d36e83ed2782225161e9a77ea49474668f82ea2aca5a2484a53b98d9b5f902a20f2e3dc73ecb33fb6c6090f5d36d0d1c2155b6a18c8129a1dbaf8dba509b
-Size (nvqctl-0.1.2.tar.gz) = 13746 bytes
+BLAKE2s (nvqctl-0.1.2.tar.gz) = 1cc3b4d9e6aa377271abe7a8fd4d68be94be08c65f1c884648210c62a847dc97
+SHA512 (nvqctl-0.1.2.tar.gz) = 6a1f2629c5f116c4cba0bf3af509ca9a7829c5e98f5d2de978516daa2e33b1f31268052a0de2ca8d652ee52ddcb427f57f13f41e5cbf621dc43744bea878506b
+Size (nvqctl-0.1.2.tar.gz) = 13741 bytes
