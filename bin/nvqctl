@@ -39,6 +39,7 @@ reset_vm_defaults() {
     DISKS=""
     NETWORK=""
     EXTRA_ARGS=""
+    PRE_START=""
 }
 reset_vm_defaults
 
@@ -337,6 +338,14 @@ cmd_start() {
 
     msg_info "Starting ${_vm}..."
 
+    # Run pre-start hook if configured
+    if [ -n "${PRE_START}" ]; then
+        msg_info "Running pre-start hook: ${PRE_START}"
+        if ! "${PRE_START}" "${_vm}"; then
+            die "Pre-start hook failed: ${PRE_START}"
+        fi
+    fi
+
     # Build command line (newline-separated arguments)
     _cmdline=$(build_qemu_cmdline "${_vm}")
 
@@ -622,6 +631,11 @@ SHUTDOWN_TIMEOUT=120
 
 # Extra QEMU arguments
 #EXTRA_ARGS=""
+
+# Pre-start hook script (runs before QEMU starts)
+# The script receives the VM name as $1.
+# If the script exits non-zero, the VM will not start.
+#PRE_START=""
 EOF
     fi
 
