@@ -179,6 +179,55 @@ ga_cmd() {
     printf '%s\n' "${_cmd}" | nc -U -w 3 "${_sock}" 2>/dev/null
 }
 
+# Format bytes to human-readable (K/M/G)
+format_bytes() {
+    _bytes="$1"
+    if [ "${_bytes}" -ge 1073741824 ]; then
+        # GB with 1 decimal place
+        _gb_int=$((_bytes / 1073741824))
+        _gb_frac=$(( (_bytes % 1073741824) * 10 / 1073741824 ))
+        printf '%s.%sG' "${_gb_int}" "${_gb_frac}"
+    elif [ "${_bytes}" -ge 1048576 ]; then
+        _mb_int=$((_bytes / 1048576))
+        _mb_frac=$(( (_bytes % 1048576) * 10 / 1048576 ))
+        printf '%s.%sM' "${_mb_int}" "${_mb_frac}"
+    elif [ "${_bytes}" -ge 1024 ]; then
+        _kb_int=$((_bytes / 1024))
+        _kb_frac=$(( (_bytes % 1024) * 10 / 1024 ))
+        printf '%s.%sK' "${_kb_int}" "${_kb_frac}"
+    else
+        printf '%sB' "${_bytes}"
+    fi
+}
+
+# Get cumulative disk I/O via QMP query-blockstats
+# Sets _rd_bytes and _wr_bytes
+get_blockstats() {
+    _vm="$1"
+    _rd_bytes=0
+    _wr_bytes=0
+    _stats=$(qmp_cmd "${_vm}" '{"execute":"query-blockstats"}' 2>/dev/null)
+    if [ -n "${_stats}" ]; then
+        _rd_bytes=$(printf '%s' "${_stats}" | grep -o '"rd_bytes":[0-9]*' | awk -F: '{s+=$2} END {printf "%d", s+0}')
+        _wr_bytes=$(printf '%s' "${_stats}" | grep -o '"wr_bytes":[0-9]*' | awk -F: '{s+=$2} END {printf "%d", s+0}')
+    fi
+}
+
+# Get process stats via ps
+# Sets _pcpu, _rss, _etime
+get_proc_stats() {
+    _pid="$1"
+    _pcpu="-"
+    _rss="-"
+    _etime="-"
+    _ps_out=$(ps -o pcpu=,rss=,etime= -p "${_pid}" 2>/dev/null | tail -1)
+    if [ -n "${_ps_out}" ]; then
+        _pcpu=$(printf '%s' "${_ps_out}" | awk '{print $1}')
+        _rss=$(printf '%s' "${_ps_out}" | awk '{print $2}')
+        _etime=$(printf '%s' "${_ps_out}" | awk '{print $3}')
+    fi
+}
+
 # --------------------------------------------------------------------------
 # QEMU command line builder
 # --------------------------------------------------------------------------
@@ -459,6 +508,22 @@ cmd_restart() {
     cmd_stop "${_vm}" && sleep 2 && cmd_start "${_vm}"
 }
 
+cmd_reboot() {
+    _vm="$1"
+
+    if ! is_running "${_vm}"; then
+        die "${_vm} is not running."
+    fi
+
+    if [ "${GUEST_AGENT}" != "yes" ] || [ ! -S "$(vm_guest_agent "${_vm}")" ]; then
+        die "Guest agent is not available for ${_vm}. Enable GUEST_AGENT=yes."
+    fi
+
+    msg_info "Rebooting ${_vm} via guest agent..."
+    ga_cmd "${_vm}" '{"execute":"guest-shutdown","arguments":{"mode":"reboot"}}' >/dev/null 2>&1
+    msg_ok "Reboot command sent to ${_vm}."
+}
+
 cmd_status() {
     _vm="$1"
 
@@ -688,6 +753,103 @@ cmd_dryrun() {
     echo ""
 }
 
+cmd_top() {
+    _interval="${1:-3}"
+
+    # Validate interval is a positive integer
+    case "${_interval}" in
+        *[!0-9]*|"") die "Invalid interval: ${_interval}" ;;
+    esac
+    [ "${_interval}" -lt 1 ] && _interval=1
+
+    _is_tty=0
+    if [ -t 1 ]; then
+        _is_tty=1
+    fi
+
+    # Clean exit on signal
+    trap 'printf "\n"; exit 0' INT TERM
+
+    while true; do
+        _output=$(_top_render)
+        if [ "${_is_tty}" -eq 1 ]; then
+            printf '\033[2J\033[H'
+        fi
+        printf '%s\n' "${_output}"
+
+        # One-shot if not a tty
+        [ "${_is_tty}" -eq 0 ] && break
+        sleep "${_interval}"
+    done
+}
+
+_top_render() {
+    _running=0
+    _total=0
+    _lines=""
+
+    for _vm in $(list_vm_configs); do
+        reset_vm_defaults
+        load_global_conf
+        load_vm_conf "${_vm}"
+
+        _total=$((_total + 1))
+
+        if is_running "${_vm}"; then
+            _running=$((_running + 1))
+            _pid=$(get_pid "${_vm}")
+            _state="running"
+
+            get_proc_stats "${_pid}"
+            # Convert RSS from KB to bytes for format_bytes
+            if [ "${_rss}" != "-" ]; then
+                _rss_bytes=$((_rss * 1024))
+                _rss_fmt=$(format_bytes "${_rss_bytes}")
+            else
+                _rss_fmt="-"
+            fi
+
+            get_blockstats "${_vm}"
+            if [ "${_rd_bytes}" -gt 0 ] 2>/dev/null; then
+                _rd_fmt=$(format_bytes "${_rd_bytes}")
+            else
+                _rd_fmt="-"
+            fi
+            if [ "${_wr_bytes}" -gt 0 ] 2>/dev/null; then
+                _wr_fmt=$(format_bytes "${_wr_bytes}")
+            else
+                _wr_fmt="-"
+            fi
+
+            _lines="${_lines}$(printf '%-16s %s%-8s%s %7s %6s %8s %4s %6s %-5s %8s %8s %s' \
+                "${_vm}" "${C_GREEN}" "${_state}" "${C_NC}" \
+                "${_pid}" "${_pcpu}" "${_rss_fmt}" "${NCPU}" \
+                "${MEMORY}M" "${ACCEL}" "${_rd_fmt}" "${_wr_fmt}" "${_etime}")
+"
+        else
+            _lines="${_lines}$(printf '%-16s %s%-8s%s %7s %6s %8s %4s %6s %-5s %8s %8s %s' \
+                "${_vm}" "${C_RED}" "stopped" "${C_NC}" \
+                "-" "-" "-" "${NCPU}" \
+                "${MEMORY}M" "${ACCEL}" "-" "-" "-")
+"
+        fi
+    done
+
+    # Header
+    _now=$(date +%H:%M:%S)
+    printf 'nvqctl top - %s  VMs: %d running, %d total  [interval: %ss]' \
+        "${_now}" "${_running}" "${_total}" "${_interval}"
+    printf '\n\n'
+    printf '%-16s %-8s %7s %6s %8s %4s %6s %-5s %8s %8s %s\n' \
+        "NAME" "STATE" "PID" "%CPU" "RSS" "VCPU" "MEM" "ACCEL" "RD" "WR" "TIME"
+
+    if [ -n "${_lines}" ]; then
+        printf '%s' "${_lines}"
+    else
+        printf 'No VMs configured.\n'
+    fi
+}
+
 # --------------------------------------------------------------------------
 # Usage / help
 # --------------------------------------------------------------------------
@@ -700,10 +862,12 @@ Usage: nvqctl <command> [<vm-name>] [options]
 
 Commands:
   list                  List all VMs and their status
+  top [interval]        Live VM monitor (default: 3s, Ctrl-C to exit)
   start <vm>            Start a VM
   stop <vm> [timeout]   Graceful shutdown (default: ${SHUTDOWN_TIMEOUT}s timeout)
   kill <vm>             Force stop (WARNING: data loss risk)
   restart <vm>          Stop then start
+  reboot <vm>           Reboot via guest agent
   status <vm>           Show detailed VM status
   console <vm>          Attach serial console (Ctrl-] to detach)
   monitor <vm>          Attach QMP monitor (Ctrl-C to detach)
@@ -752,6 +916,10 @@ main() {
             cmd_list
             exit $?
             ;;
+        top)
+            cmd_top "${_vmname}"
+            exit $?
+            ;;
     esac
 
     # All other commands require a VM name
@@ -780,6 +948,7 @@ main() {
         stop)      cmd_stop    "${_vmname}" "${_extra}" ;;
         kill)      cmd_kill    "${_vmname}" ;;
         restart)   cmd_restart "${_vmname}" ;;
+        reboot)    cmd_reboot  "${_vmname}" ;;
         status)    cmd_status  "${_vmname}" ;;
         console)   cmd_console "${_vmname}" ;;
         monitor)   cmd_monitor "${_vmname}" ;;

@@ -81,10 +81,12 @@ nvqctl stop myvm
 | Command | Description |
 |---------|-------------|
 | `nvqctl list` | List all VMs and their status |
+| `nvqctl top [interval]` | Live VM resource monitor |
 | `nvqctl start <vm>` | Start a VM |
 | `nvqctl stop <vm> [timeout]` | Graceful ACPI/guest-agent shutdown |
 | `nvqctl kill <vm>` | Force stop (data loss risk) |
 | `nvqctl restart <vm>` | Stop then start |
+| `nvqctl reboot <vm>` | Reboot via guest agent |
 | `nvqctl status <vm>` | Show detailed VM status |
 | `nvqctl console <vm>` | Attach serial console |
 | `nvqctl monitor <vm>` | Attach QMP monitor |
@@ -202,6 +204,7 @@ Ensure `tty01` is set to `off` in `/etc/ttys` (no getty conflict).
 | `xl destroy myvm` | `nvqctl kill myvm` |
 | `xl console myvm` | `nvqctl console myvm` |
 | `xl list` | `nvqctl list` |
+| `xl top` | `nvqctl top` |
 
 ## Directory Layout
 
