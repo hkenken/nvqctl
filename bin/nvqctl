@@ -10,7 +10,7 @@ set -u
 # See nvqctl(8) for usage details.
 #
 
-NVQCTL_VERSION="0.1.0"
+NVQCTL_VERSION="0.1.1"
 
 # --------------------------------------------------------------------------
 # Default paths
