@@ -1,0 +1,12 @@
+nvqctl is a lightweight CLI tool for managing QEMU virtual machines with
+NVMM hardware acceleration on NetBSD. Inspired by Xen's xl and OpenBSD's
+vmctl.
+
+Features:
+- Zero dependencies beyond NetBSD base system + QEMU
+- Multiple VM management with per-VM configuration files
+- Graceful shutdown via guest-agent, ACPI, or QMP
+- Serial console and QMP monitor access
+- rc.d integration for auto-start/stop VMs at boot
+- VirtIO-first: virtio-blk, virtio-net, virtio-rng
+- Pure POSIX sh, no additional interpreters required

@@ -1,0 +1,26 @@
+===========================================================================
+$${PKGBASE} has been installed.
+
+Quick start:
+
+  1. Create a VM configuration:
+     $ nvqctl create myvm
+     $ nvqctl config myvm    # edit to match your setup
+
+  2. Preview the QEMU command line:
+     $ nvqctl dryrun myvm
+
+  3. Start and manage:
+     $ nvqctl start myvm
+     $ nvqctl list
+     $ nvqctl console myvm   # Ctrl-] to detach
+
+  4. Auto-start VMs at boot (add to /etc/rc.conf):
+     nvqctl=YES
+     nvqctl_vms="myvm"
+
+  Configuration: ${PKG_SYSCONFDIR}/
+  Examples:      ${PREFIX}/share/examples/nvqctl/
+
+  For serial console, install socat:  pkg_add socat
+===========================================================================

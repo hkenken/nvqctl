@@ -1,0 +1,4 @@
+@comment $NetBSD$
+sbin/nvqctl
+share/examples/nvqctl/example.conf
+share/examples/nvqctl/nvqctl.conf

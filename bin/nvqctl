@@ -1,0 +1,777 @@
+#!/bin/sh
+#
+# nvqctl - NVMM/QEMU Virtual Machine Control for NetBSD
+#
+# Copyright (c) 2025, Kenichi Hashimoto
+# All rights reserved.
+# Licensed under the BSD 2-Clause License.
+#
+# See nvqctl(8) for usage details.
+#
+
+NVQCTL_VERSION="0.1.0"
+
+# --------------------------------------------------------------------------
+# Default paths
+# --------------------------------------------------------------------------
+NVQCTL_CONFDIR="${NVQCTL_CONFDIR:-/usr/local/etc/nvqctl}"
+NVQCTL_RUNDIR="${NVQCTL_RUNDIR:-/var/run/nvqctl}"
+NVQCTL_EXDIR="${NVQCTL_EXDIR:-/usr/local/share/examples/nvqctl}"
+NVQCTL_CONF="${NVQCTL_CONFDIR}/nvqctl.conf"
+
+# --------------------------------------------------------------------------
+# Global defaults (overridable via nvqctl.conf and per-VM config)
+# --------------------------------------------------------------------------
+reset_vm_defaults() {
+    QEMU_BIN="/usr/pkg/bin/qemu-system-x86_64"
+    ACCEL="nvmm"
+    CPU="host"
+    NCPU=1
+    MEMORY=1024
+    DISPLAY_OPT="none"
+    SERIAL="yes"
+    GUEST_AGENT="no"
+    GUEST_AGENT_METHOD="isa-serial"
+    VIRTIO_RNG="yes"
+    RTC_BASE="localtime"
+    SHUTDOWN_TIMEOUT=120
+    DISKS=""
+    NETWORK=""
+    EXTRA_ARGS=""
+}
+reset_vm_defaults
+
+# --------------------------------------------------------------------------
+# Color output (disabled if not a terminal)
+# --------------------------------------------------------------------------
+if [ -t 1 ]; then
+    C_RED='\033[0;31m'
+    C_GREEN='\033[0;32m'
+    C_YELLOW='\033[0;33m'
+    C_BLUE='\033[0;34m'
+    C_BOLD='\033[1m'
+    C_NC='\033[0m'
+else
+    C_RED='' C_GREEN='' C_YELLOW='' C_BLUE='' C_BOLD='' C_NC=''
+fi
+
+# --------------------------------------------------------------------------
+# Utility functions
+# --------------------------------------------------------------------------
+
+# Print messages
+msg()      { printf "%b\n" "$*"; }
+msg_info() { msg "${C_BLUE}==>${C_NC} $*"; }
+msg_ok()   { msg "${C_GREEN}==>${C_NC} $*"; }
+msg_warn() { msg "${C_YELLOW}WARNING:${C_NC} $*"; }
+msg_err()  { msg "${C_RED}ERROR:${C_NC} $*" >&2; }
+
+# Die with error message
+die() { msg_err "$*"; exit 1; }
+
+# Check if a command exists
+has_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+# --------------------------------------------------------------------------
+# Configuration loading
+# --------------------------------------------------------------------------
+
+# Load global config
+load_global_conf() {
+    if [ -f "${NVQCTL_CONF}" ]; then
+        . "${NVQCTL_CONF}"
+    fi
+}
+
+# Load per-VM config; die if not found
+load_vm_conf() {
+    _vmname="$1"
+    _vmconf="${NVQCTL_CONFDIR}/vm/${_vmname}.conf"
+
+    if [ ! -f "${_vmconf}" ]; then
+        die "VM config not found: ${_vmconf}"
+    fi
+
+    . "${_vmconf}"
+}
+
+# List available VM configs
+list_vm_configs() {
+    if [ ! -d "${NVQCTL_CONFDIR}/vm" ]; then
+        return
+    fi
+    for _f in "${NVQCTL_CONFDIR}/vm"/*.conf; do
+        [ -f "${_f}" ] || continue
+        basename "${_f}" .conf
+    done
+}
+
+# --------------------------------------------------------------------------
+# Runtime helpers
+# --------------------------------------------------------------------------
+
+# Get paths for a given VM
+vm_rundir()     { echo "${NVQCTL_RUNDIR}/${1}"; }
+vm_pidfile()    { echo "${NVQCTL_RUNDIR}/${1}/qemu.pid"; }
+vm_monitor()    { echo "${NVQCTL_RUNDIR}/${1}/monitor.sock"; }
+vm_serial()     { echo "${NVQCTL_RUNDIR}/${1}/serial.sock"; }
+vm_guest_agent(){ echo "${NVQCTL_RUNDIR}/${1}/guest-agent.sock"; }
+
+# Check if VM is running
+is_running() {
+    _pidfile="$(vm_pidfile "$1")"
+    if [ -f "${_pidfile}" ]; then
+        _pid=$(cat "${_pidfile}" 2>/dev/null)
+        if [ -n "${_pid}" ] && kill -0 "${_pid}" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Get PID of running VM
+get_pid() {
+    cat "$(vm_pidfile "$1")" 2>/dev/null
+}
+
+# Send a QMP command and return result
+# Usage: qmp_cmd <vm_name> <json_command>
+qmp_cmd() {
+    _vm="$1"
+    _cmd="$2"
+    _sock="$(vm_monitor "${_vm}")"
+
+    if [ ! -S "${_sock}" ]; then
+        return 1
+    fi
+
+    # QMP requires capability negotiation first
+    # Send qmp_capabilities then the actual command
+    {
+        printf '{"execute":"qmp_capabilities"}\n'
+        sleep 0.2
+        printf '%s\n' "${_cmd}"
+        sleep 0.2
+    } | nc -U "${_sock}" 2>/dev/null
+}
+
+# Send a QMP command (fire and forget, no output parsing)
+qmp_fire() {
+    _vm="$1"
+    _cmd="$2"
+    qmp_cmd "${_vm}" "${_cmd}" >/dev/null 2>&1
+}
+
+# Send guest-agent command
+# Usage: ga_cmd <vm_name> <json_command>
+ga_cmd() {
+    _vm="$1"
+    _cmd="$2"
+    _sock="$(vm_guest_agent "${_vm}")"
+
+    if [ ! -S "${_sock}" ]; then
+        return 1
+    fi
+
+    # Guest agent does not require capability negotiation
+    printf '%s\n' "${_cmd}" | nc -U -w 3 "${_sock}" 2>/dev/null
+}
+
+# --------------------------------------------------------------------------
+# QEMU command line builder
+# --------------------------------------------------------------------------
+
+build_qemu_cmdline() {
+    _vm="$1"
+    _rundir="$(vm_rundir "${_vm}")"
+
+    # Ensure runtime directory exists
+    mkdir -p "${_rundir}"
+
+    # Start building command
+    set -- "${QEMU_BIN}"
+    set -- "$@" -name "${_vm}"
+    set -- "$@" -cpu "${CPU}"
+    set -- "$@" -smp "cpus=${NCPU}"
+    set -- "$@" -accel "${ACCEL}"
+    set -- "$@" -m "${MEMORY}"
+
+    # Disks
+    _disk_idx=0
+    _ifs="$IFS"
+    IFS='
+'
+    for _entry in ${DISKS}; do
+        IFS="${_ifs}"
+        # Trim whitespace
+        _entry=$(echo "${_entry}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [ -z "${_entry}" ] && continue
+
+        # Parse path:format:cache
+        _path=$(echo "${_entry}" | cut -d: -f1)
+        _fmt=$(echo "${_entry}" | cut -d: -f2 -s)
+        _cache=$(echo "${_entry}" | cut -d: -f3 -s)
+
+        [ -z "${_fmt}" ] && _fmt="raw"
+
+        _drive_opts="file=${_path},format=${_fmt},if=none,id=hd${_disk_idx}"
+        if [ -n "${_cache}" ]; then
+            _drive_opts="${_drive_opts},cache=${_cache}"
+        fi
+
+        set -- "$@" -drive "${_drive_opts}"
+        set -- "$@" -device "virtio-blk-pci,drive=hd${_disk_idx}"
+
+        _disk_idx=$((_disk_idx + 1))
+    done
+    IFS="${_ifs}"
+
+    # Network
+    _net_idx=0
+    _ifs="$IFS"
+    IFS='
+'
+    for _entry in ${NETWORK}; do
+        IFS="${_ifs}"
+        _entry=$(echo "${_entry}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [ -z "${_entry}" ] && continue
+
+        # Parse tap_name:mac_address
+        _tap=$(echo "${_entry}" | cut -d: -f1)
+        # MAC address contains colons, so rejoin fields 2-7
+        _mac=$(echo "${_entry}" | cut -d: -f2- -s)
+
+        _netdev_opts="tap,id=net${_net_idx},ifname=${_tap},script=no"
+        _dev_opts="virtio-net-pci,netdev=net${_net_idx}"
+
+        if [ -n "${_mac}" ]; then
+            _dev_opts="${_dev_opts},mac=${_mac}"
+        fi
+
+        set -- "$@" -netdev "${_netdev_opts}"
+        set -- "$@" -device "${_dev_opts}"
+
+        _net_idx=$((_net_idx + 1))
+    done
+    IFS="${_ifs}"
+
+    # Display
+    set -- "$@" -display "${DISPLAY_OPT}"
+
+    # RTC
+    set -- "$@" -rtc "base=${RTC_BASE}"
+
+    # VirtIO RNG
+    if [ "${VIRTIO_RNG}" = "yes" ]; then
+        set -- "$@" \
+            -object "rng-random,filename=/dev/urandom,id=viornd0" \
+            -device "virtio-rng-pci,rng=viornd0"
+    fi
+
+    # Serial console
+    if [ "${SERIAL}" = "yes" ]; then
+        set -- "$@" \
+            -serial "unix:${_rundir}/serial.sock,server=on,wait=off"
+    fi
+
+    # Guest agent
+    if [ "${GUEST_AGENT}" = "yes" ]; then
+        if [ "${GUEST_AGENT_METHOD}" = "virtio-serial" ]; then
+            set -- "$@" \
+                -chardev "socket,path=${_rundir}/guest-agent.sock,server=on,wait=off,id=qga0" \
+                -device "virtio-serial-pci" \
+                -device "virtserialport,chardev=qga0,name=org.qemu.guest_agent.0"
+        else
+            # isa-serial (default for NetBSD guests)
+            set -- "$@" \
+                -chardev "socket,path=${_rundir}/guest-agent.sock,server=on,wait=off,id=qga0" \
+                -device "isa-serial,chardev=qga0"
+        fi
+    fi
+
+    # QMP monitor socket
+    set -- "$@" \
+        -chardev "socket,path=${_rundir}/monitor.sock,server=on,wait=off,id=mon0" \
+        -mon "chardev=mon0,mode=control"
+
+    # PID file
+    set -- "$@" -pidfile "${_rundir}/qemu.pid"
+
+    # Daemonize
+    set -- "$@" -daemonize
+
+    # Extra arguments
+    if [ -n "${EXTRA_ARGS}" ]; then
+        # Word-split EXTRA_ARGS intentionally
+        # shellcheck disable=SC2086
+        set -- "$@" ${EXTRA_ARGS}
+    fi
+
+    # Output the full command
+    for _arg; do
+        printf '%s\n' "${_arg}"
+    done
+}
+
+# --------------------------------------------------------------------------
+# Commands
+# --------------------------------------------------------------------------
+
+cmd_start() {
+    _vm="$1"
+
+    if is_running "${_vm}"; then
+        msg_ok "${_vm} is already running (PID: $(get_pid "${_vm}"))"
+        return 1
+    fi
+
+    # Clean up stale runtime files from a previous crash
+    _rundir="$(vm_rundir "${_vm}")"
+    if [ -d "${_rundir}" ]; then
+        rm -f "${_rundir}/qemu.pid" \
+              "${_rundir}/monitor.sock" \
+              "${_rundir}/serial.sock" \
+              "${_rundir}/guest-agent.sock"
+    fi
+
+    msg_info "Starting ${_vm}..."
+
+    # Build command line (newline-separated arguments)
+    _cmdline=$(build_qemu_cmdline "${_vm}")
+
+    # Execute: convert newline-separated args back to proper argv
+    # Use a temporary script to preserve argument boundaries
+    _tmpscript=$(mktemp /tmp/nvqctl.XXXXXX) || die "Failed to create temp file"
+    {
+        echo '#!/bin/sh'
+        echo 'exec \'
+        echo "${_cmdline}" | while IFS= read -r _line; do
+            # Escape single quotes in arguments
+            _escaped=$(printf '%s' "${_line}" | sed "s/'/'\\\\''/g")
+            printf "  '%s' \\\\\n" "${_escaped}"
+        done
+        echo '  ;'
+    } > "${_tmpscript}"
+    chmod 700 "${_tmpscript}"
+
+    if sh "${_tmpscript}"; then
+        rm -f "${_tmpscript}"
+        # Wait briefly for PID file
+        sleep 0.5
+        if is_running "${_vm}"; then
+            msg_ok "${_vm} started (PID: $(get_pid "${_vm}"))"
+        else
+            msg_warn "${_vm} may have failed to start (no PID file)"
+        fi
+    else
+        rm -f "${_tmpscript}"
+        die "Failed to start ${_vm}"
+    fi
+}
+
+cmd_stop() {
+    _vm="$1"
+    _timeout="${2:-${SHUTDOWN_TIMEOUT}}"
+
+    if ! is_running "${_vm}"; then
+        msg_warn "${_vm} is not running."
+        return 1
+    fi
+
+    _pid=$(get_pid "${_vm}")
+    msg_info "Stopping ${_vm} (PID: ${_pid})..."
+
+    # Strategy 1: Guest agent shutdown (cleanest)
+    if [ "${GUEST_AGENT}" = "yes" ] && [ -S "$(vm_guest_agent "${_vm}")" ]; then
+        msg_info "Requesting shutdown via guest agent..."
+        ga_cmd "${_vm}" '{"execute":"guest-shutdown"}' >/dev/null 2>&1
+    else
+        # Strategy 2: ACPI power button
+        msg_info "Sending ACPI powerdown..."
+        qmp_fire "${_vm}" '{"execute":"system_powerdown"}'
+    fi
+
+    # Wait for graceful shutdown
+    _elapsed=0
+    while [ "${_elapsed}" -lt "${_timeout}" ]; do
+        if ! kill -0 "${_pid}" 2>/dev/null; then
+            msg_ok "${_vm} shut down gracefully (${_elapsed}s)."
+            rm -f "$(vm_pidfile "${_vm}")"
+            return 0
+        fi
+        sleep 1
+        _elapsed=$((_elapsed + 1))
+        if [ $((_elapsed % 10)) -eq 0 ]; then
+            msg "  waiting... (${_elapsed}s/${_timeout}s)"
+        fi
+    done
+
+    msg_err "Timeout after ${_timeout}s. Use 'nvqctl kill ${_vm}' to force stop."
+    return 1
+}
+
+cmd_kill() {
+    _vm="$1"
+
+    if ! is_running "${_vm}"; then
+        msg_warn "${_vm} is not running."
+        rm -f "$(vm_pidfile "${_vm}")"
+        return 1
+    fi
+
+    _pid=$(get_pid "${_vm}")
+    msg_warn "Force killing ${_vm} (PID: ${_pid})..."
+    msg_warn "This may cause data loss!"
+
+    # Try QMP quit first
+    qmp_fire "${_vm}" '{"execute":"quit"}'
+    sleep 2
+
+    if kill -0 "${_pid}" 2>/dev/null; then
+        kill -9 "${_pid}" 2>/dev/null
+    fi
+
+    _rundir="$(vm_rundir "${_vm}")"
+    rm -f "${_rundir}/qemu.pid" \
+          "${_rundir}/monitor.sock" \
+          "${_rundir}/serial.sock" \
+          "${_rundir}/guest-agent.sock"
+    msg_ok "${_vm} killed."
+}
+
+cmd_restart() {
+    _vm="$1"
+    cmd_stop "${_vm}" && sleep 2 && cmd_start "${_vm}"
+}
+
+cmd_status() {
+    _vm="$1"
+
+    if is_running "${_vm}"; then
+        _pid=$(get_pid "${_vm}")
+        msg "${C_GREEN}${_vm}${C_NC} is ${C_GREEN}running${C_NC}"
+        msg "  PID:       ${_pid}"
+        msg "  Monitor:   $(vm_monitor "${_vm}")"
+        if [ "${SERIAL}" = "yes" ]; then
+            msg "  Serial:    $(vm_serial "${_vm}")"
+        fi
+        if [ "${GUEST_AGENT}" = "yes" ]; then
+            msg "  Agent:     $(vm_guest_agent "${_vm}")"
+        fi
+        msg "  CPU:       ${NCPU} vCPU(s), ${CPU}"
+        msg "  Memory:    ${MEMORY} MB"
+        msg "  Accel:     ${ACCEL}"
+    else
+        msg "${C_RED}${_vm}${C_NC} is ${C_RED}stopped${C_NC}"
+    fi
+}
+
+cmd_list() {
+    _found=0
+    printf "%-20s %-10s %-8s %-6s %-6s %s\n" \
+        "NAME" "STATE" "PID" "VCPU" "MEM" "ACCEL"
+
+    for _vm in $(list_vm_configs); do
+        # Reset all defaults before loading each VM config
+        reset_vm_defaults
+        load_global_conf
+        load_vm_conf "${_vm}"
+
+        if is_running "${_vm}"; then
+            _state="running"
+            _pid=$(get_pid "${_vm}")
+            _color="${C_GREEN}"
+        else
+            _state="stopped"
+            _pid="-"
+            _color="${C_RED}"
+        fi
+
+        printf "%-20s ${_color}%-10s${C_NC} %-8s %-6s %-6s %s\n" \
+            "${_vm}" "${_state}" "${_pid}" "${NCPU}" "${MEMORY}" "${ACCEL}"
+        _found=1
+    done
+
+    if [ "${_found}" -eq 0 ]; then
+        msg "No VMs configured. Create a config in ${NVQCTL_CONFDIR}/vm/"
+    fi
+}
+
+cmd_console() {
+    _vm="$1"
+
+    if ! is_running "${_vm}"; then
+        die "${_vm} is not running."
+    fi
+
+    if [ "${SERIAL}" != "yes" ]; then
+        die "Serial console is disabled for ${_vm}."
+    fi
+
+    _sock="$(vm_serial "${_vm}")"
+    if [ ! -S "${_sock}" ]; then
+        die "Serial socket not found: ${_sock}"
+    fi
+
+    msg_info "Connecting to ${_vm} serial console..."
+    msg "  Detach: Ctrl-] (socat) or ~. (cu)"
+    echo ""
+
+    if has_cmd socat; then
+        exec socat -,rawer,escape=0x1d UNIX-CONNECT:"${_sock}"
+    elif has_cmd cu; then
+        exec cu -l "${_sock}"
+    else
+        die "Install socat (pkg_add socat) for console access."
+    fi
+}
+
+cmd_monitor() {
+    _vm="$1"
+
+    if ! is_running "${_vm}"; then
+        die "${_vm} is not running."
+    fi
+
+    _sock="$(vm_monitor "${_vm}")"
+    if [ ! -S "${_sock}" ]; then
+        die "Monitor socket not found: ${_sock}"
+    fi
+
+    msg_info "Connecting to ${_vm} QMP monitor..."
+    msg "  This is a JSON (QMP) interface."
+    msg "  Type {\"execute\":\"query-status\"} for status."
+    msg "  Ctrl-C to detach."
+    echo ""
+
+    if has_cmd socat; then
+        exec socat -,echo=0,icanon=0 UNIX-CONNECT:"${_sock}"
+    elif has_cmd nc; then
+        exec nc -U "${_sock}"
+    else
+        die "Install socat (pkg_add socat) for monitor access."
+    fi
+}
+
+cmd_create() {
+    _vm="$1"
+    _vmconf="${NVQCTL_CONFDIR}/vm/${_vm}.conf"
+
+    if [ -f "${_vmconf}" ]; then
+        die "VM config already exists: ${_vmconf}"
+    fi
+
+    mkdir -p "${NVQCTL_CONFDIR}/vm"
+
+    # Copy example config
+    _example="${NVQCTL_EXDIR}/example.conf"
+
+    if [ -f "${_example}" ]; then
+        sed "s/example/${_vm}/g" "${_example}" > "${_vmconf}"
+    else
+        # Generate minimal config
+        cat > "${_vmconf}" << EOF
+# nvqctl VM configuration: ${_vm}
+# See nvqctl(8) for details.
+
+# CPU and memory
+NCPU=1
+MEMORY=1024
+
+# Accelerator: nvmm | tcg
+ACCEL=nvmm
+CPU=host
+
+# Disks (one per line, format: path[:format[:cache]])
+DISKS="
+  /path/to/${_vm}/root.img:raw
+"
+
+# Network (one per line, format: tap_name[:mac_address])
+NETWORK="
+  tap0
+"
+
+# Display: none | vnc | spice
+DISPLAY_OPT=none
+
+# Serial console: yes | no
+SERIAL=yes
+
+# Guest agent: yes | no
+GUEST_AGENT=no
+GUEST_AGENT_METHOD=isa-serial
+
+# VirtIO RNG: yes | no
+VIRTIO_RNG=yes
+
+# RTC base: localtime | utc
+RTC_BASE=localtime
+
+# Shutdown timeout (seconds)
+SHUTDOWN_TIMEOUT=120
+
+# QEMU binary (override global default)
+#QEMU_BIN=/usr/pkg/bin/qemu-system-x86_64
+
+# Extra QEMU arguments
+#EXTRA_ARGS=""
+EOF
+    fi
+
+    msg_ok "Created ${_vmconf}"
+    msg "  Edit this file to configure the VM, then run: nvqctl start ${_vm}"
+}
+
+cmd_config() {
+    _vm="$1"
+    _vmconf="${NVQCTL_CONFDIR}/vm/${_vm}.conf"
+
+    if [ ! -f "${_vmconf}" ]; then
+        die "VM config not found: ${_vmconf}"
+    fi
+
+    if [ -n "${EDITOR}" ]; then
+        exec "${EDITOR}" "${_vmconf}"
+    elif has_cmd vi; then
+        exec vi "${_vmconf}"
+    else
+        # Just display it
+        cat "${_vmconf}"
+    fi
+}
+
+# Show the QEMU command line that would be executed (dry run)
+cmd_dryrun() {
+    _vm="$1"
+    msg_info "QEMU command line for ${_vm}:"
+    echo ""
+
+    _first=1
+    build_qemu_cmdline "${_vm}" | while IFS= read -r _arg; do
+        if [ "${_first}" -eq 1 ]; then
+            printf '  %s' "${_arg}"
+            _first=0
+            continue
+        fi
+        case "${_arg}" in
+            -*)
+                # New option: start a new line
+                printf ' \\\n    %s' "${_arg}"
+                ;;
+            *)
+                # Value for previous option: same line
+                printf ' %s' "${_arg}"
+                ;;
+        esac
+    done
+    echo ""
+}
+
+# --------------------------------------------------------------------------
+# Usage / help
+# --------------------------------------------------------------------------
+
+usage() {
+    cat << EOF
+nvqctl ${NVQCTL_VERSION} - NVMM/QEMU Virtual Machine Control for NetBSD
+
+Usage: nvqctl <command> [<vm-name>] [options]
+
+Commands:
+  list                  List all VMs and their status
+  start <vm>            Start a VM
+  stop <vm> [timeout]   Graceful shutdown (default: ${SHUTDOWN_TIMEOUT}s timeout)
+  kill <vm>             Force stop (WARNING: data loss risk)
+  restart <vm>          Stop then start
+  status <vm>           Show detailed VM status
+  console <vm>          Attach serial console (Ctrl-] to detach)
+  monitor <vm>          Attach QMP monitor (Ctrl-C to detach)
+  create <vm>           Create a new VM configuration
+  config <vm>           Edit VM configuration
+  dryrun <vm>           Show QEMU command line (without starting)
+
+Options:
+  -V, --version         Show version
+  -h, --help            Show this help
+
+Configuration:
+  Global:  ${NVQCTL_CONF}
+  Per-VM:  ${NVQCTL_CONFDIR}/vm/<name>.conf
+  Runtime: ${NVQCTL_RUNDIR}/<name>/
+
+EOF
+}
+
+# --------------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------------
+
+main() {
+    # Parse global options
+    case "${1:-}" in
+        -V|--version) echo "nvqctl ${NVQCTL_VERSION}"; exit 0 ;;
+        -h|--help)    usage; exit 0 ;;
+    esac
+
+    _command="${1:-}"
+    _vmname="${2:-}"
+    _extra="${3:-}"
+
+    if [ -z "${_command}" ]; then
+        usage
+        exit 1
+    fi
+
+    # Load global config
+    load_global_conf
+
+    # Commands that don't require a VM name
+    case "${_command}" in
+        list)
+            cmd_list
+            exit $?
+            ;;
+    esac
+
+    # All other commands require a VM name
+    if [ -z "${_vmname}" ]; then
+        die "VM name required. Usage: nvqctl ${_command} <vm-name>"
+    fi
+
+    # Validate VM name (alphanumeric, dash, underscore only)
+    case "${_vmname}" in
+        *[!a-zA-Z0-9_-]*)
+            die "Invalid VM name '${_vmname}'. Use only [a-zA-Z0-9_-]."
+            ;;
+    esac
+
+    # Load VM config (except for 'create' which creates it)
+    case "${_command}" in
+        create) ;;
+        *)
+            load_vm_conf "${_vmname}"
+            ;;
+    esac
+
+    # Dispatch
+    case "${_command}" in
+        start)     cmd_start   "${_vmname}" ;;
+        stop)      cmd_stop    "${_vmname}" "${_extra}" ;;
+        kill)      cmd_kill    "${_vmname}" ;;
+        restart)   cmd_restart "${_vmname}" ;;
+        status)    cmd_status  "${_vmname}" ;;
+        console)   cmd_console "${_vmname}" ;;
+        monitor)   cmd_monitor "${_vmname}" ;;
+        create)    cmd_create  "${_vmname}" ;;
+        config)    cmd_config  "${_vmname}" ;;
+        dryrun)    cmd_dryrun  "${_vmname}" ;;
+        *)
+            msg_err "Unknown command: ${_command}"
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
