@@ -1,4 +1,5 @@
 #!/bin/sh
+set -u
 #
 # nvqctl - NVMM/QEMU Virtual Machine Control for NetBSD
 #
@@ -391,10 +392,14 @@ cmd_stop() {
         qmp_fire "${_vm}" '{"execute":"system_powerdown"}'
     fi
 
+    # Catch SIGINT during shutdown wait
+    trap 'msg_warn "中断しました。VM がまだシャットダウン中の可能性があります"; trap - INT; return 1' INT
+
     # Wait for graceful shutdown
     _elapsed=0
     while [ "${_elapsed}" -lt "${_timeout}" ]; do
         if ! kill -0 "${_pid}" 2>/dev/null; then
+            trap - INT
             msg_ok "${_vm} shut down gracefully (${_elapsed}s)."
             rm -f "$(vm_pidfile "${_vm}")"
             return 0
@@ -406,6 +411,7 @@ cmd_stop() {
         fi
     done
 
+    trap - INT
     msg_err "Timeout after ${_timeout}s. Use 'nvqctl kill ${_vm}' to force stop."
     return 1
 }
@@ -631,7 +637,7 @@ cmd_config() {
         die "VM config not found: ${_vmconf}"
     fi
 
-    if [ -n "${EDITOR}" ]; then
+    if [ -n "${EDITOR:-}" ]; then
         exec "${EDITOR}" "${_vmconf}"
     elif has_cmd vi; then
         exec vi "${_vmconf}"

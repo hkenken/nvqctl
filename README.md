@@ -29,7 +29,7 @@ acceleration on NetBSD. Inspired by Xen's `xl` and OpenBSD's `vmctl`.
 ### From source (manual)
 
 ```sh
-git clone https://github.com/YOUR_USER/nvqctl.git
+git clone https://github.com/hkenken/nvqctl.git
 cd nvqctl
 make install
 ```

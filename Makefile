@@ -29,9 +29,9 @@ install:
 	${INSTALL_DIR} ${DESTDIR}${RCDIR}
 	${INSTALL_DIR} ${DESTDIR}/var/run/nvqctl
 	${INSTALL_PROGRAM} bin/nvqctl ${DESTDIR}${PREFIX}/sbin/nvqctl
-	${INSTALL_PROGRAM} rc.d/nvqctl ${DESTDIR}${RCDIR}/nvqctl
+	sed 's|@PREFIX@|${PREFIX}|g' rc.d/nvqctl > ${DESTDIR}${RCDIR}/nvqctl
+	chmod 755 ${DESTDIR}${RCDIR}/nvqctl
 	${INSTALL_DATA} share/examples/example.conf ${DESTDIR}${EXAMPLEDIR}/example.conf
-	${INSTALL_DATA} share/examples/5f-netbsd.conf ${DESTDIR}${EXAMPLEDIR}/5f-netbsd.conf
 	@if [ ! -f ${DESTDIR}${CONFDIR}/nvqctl.conf ]; then \
 		${INSTALL_DATA} etc/nvqctl.conf ${DESTDIR}${CONFDIR}/nvqctl.conf; \
 		echo "Installed default config: ${CONFDIR}/nvqctl.conf"; \
