@@ -2,3 +2,4 @@
 sbin/nvqctl
 share/examples/nvqctl/example.conf
 share/examples/nvqctl/nvqctl.conf
+share/examples/rc.d/nvqctl
