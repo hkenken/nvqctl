@@ -754,11 +754,15 @@ cmd_dryrun() {
 }
 
 cmd_top() {
+    if [ "$(id -u)" -ne 0 ]; then
+        die "nvqctl top requires root privileges."
+    fi
+
     _interval="${1:-3}"
 
     # Validate interval is a positive integer
     case "${_interval}" in
-        ""|*[!0-9]*) die "Invalid interval: ${_interval}" ;;
+        *[!0-9]*|"") die "Invalid interval: ${_interval}" ;;
     esac
     [ "${_interval}" -lt 1 ] && _interval=1
 
@@ -821,14 +825,14 @@ _top_render() {
                 _wr_fmt="-"
             fi
 
-            _lines="${_lines}$(printf '%-16s %s%-8s%s %7s %6s %8s %4s %6s %-5s %8s %8s %s' \
-                "${_vm}" "${C_GREEN}" "${_state}" "${C_NC}" \
+            _lines="${_lines}$(printf "%-16s ${C_GREEN}%-8s${C_NC} %7s %6s %8s %4s %6s %-5s %8s %8s %s" \
+                "${_vm}" "${_state}" \
                 "${_pid}" "${_pcpu}" "${_rss_fmt}" "${NCPU}" \
                 "${MEMORY}M" "${ACCEL}" "${_rd_fmt}" "${_wr_fmt}" "${_etime}")
 "
         else
-            _lines="${_lines}$(printf '%-16s %s%-8s%s %7s %6s %8s %4s %6s %-5s %8s %8s %s' \
-                "${_vm}" "${C_RED}" "stopped" "${C_NC}" \
+            _lines="${_lines}$(printf "%-16s ${C_RED}%-8s${C_NC} %7s %6s %8s %4s %6s %-5s %8s %8s %s" \
+                "${_vm}" "stopped" \
                 "-" "-" "-" "${NCPU}" \
                 "${MEMORY}M" "${ACCEL}" "-" "-" "-")
 "
