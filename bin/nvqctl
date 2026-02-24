@@ -154,7 +154,7 @@ qmp_cmd() {
         sleep 0.2
         printf '%s\n' "${_cmd}"
         sleep 0.2
-    } | nc -U "${_sock}" 2>/dev/null
+    } | nc -U -w 2 "${_sock}" 2>/dev/null
 }
 
 # Send a QMP command (fire and forget, no output parsing)
@@ -220,12 +220,12 @@ get_proc_stats() {
     _pcpu="-"
     _rss="-"
     _etime="-"
-    _ps_out=$(ps -o pcpu=,rss=,etime= -p "${_pid}" 2>/dev/null | tail -1)
-    if [ -n "${_ps_out}" ]; then
-        _pcpu=$(printf '%s' "${_ps_out}" | awk '{print $1}')
-        _rss=$(printf '%s' "${_ps_out}" | awk '{print $2}')
-        _etime=$(printf '%s' "${_ps_out}" | awk '{print $3}')
-    fi
+    _val=$(ps -o pcpu= -p "${_pid}" 2>/dev/null | tail -1 | awk '{print $1}')
+    [ -n "${_val}" ] && _pcpu="${_val}"
+    _val=$(ps -o rss= -p "${_pid}" 2>/dev/null | tail -1 | awk '{print $1}')
+    [ -n "${_val}" ] && _rss="${_val}"
+    _val=$(ps -o etime= -p "${_pid}" 2>/dev/null | tail -1 | awk '{print $1}')
+    [ -n "${_val}" ] && _etime="${_val}"
 }
 
 # --------------------------------------------------------------------------
