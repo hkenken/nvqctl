@@ -758,7 +758,7 @@ cmd_top() {
 
     # Validate interval is a positive integer
     case "${_interval}" in
-        *[!0-9]*|"") die "Invalid interval: ${_interval}" ;;
+        ""|*[!0-9]*) die "Invalid interval: ${_interval}" ;;
     esac
     [ "${_interval}" -lt 1 ] && _interval=1
 
@@ -917,7 +917,11 @@ main() {
             exit $?
             ;;
         top)
-            cmd_top "${_vmname}"
+            if [ -n "${_vmname}" ]; then
+                cmd_top "${_vmname}"
+            else
+                cmd_top
+            fi
             exit $?
             ;;
     esac
